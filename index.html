@@ -24,7 +24,7 @@
 
     <script type="text/babel">
         // =============================================================
-        // STEP 1: CONFIGURE YOUR KEYS HERE
+        // STEP 1: CONFIGURE YOUR KEYS HERE (For GitHub Deployment)
         // =============================================================
         
         // 1. Paste your Firebase Config Object from the Firebase Console
@@ -38,19 +38,26 @@
         };
 
         // 2. Paste your Google AI Studio API Key (for Gemini)
-        const myGeminiApiKey = "YOUR_GEMINI_API_KEY";
+        const myGeminiApiKey = ""; // Left empty to use environment key in preview
 
         // =============================================================
         // APP LOGIC
         // =============================================================
         const { useState, useRef, useEffect } = React;
 
-        // Initialize Firebase (Compat version for CDN use)
-        firebase.initializeApp(myFirebaseConfig);
+        // Configuration handling for both Environment and Manual setup
+        const firebaseConfig = typeof __firebase_config !== 'undefined' 
+            ? JSON.parse(__firebase_config) 
+            : myFirebaseConfig;
+
+        // Initialize Firebase
+        if (!firebase.apps.length) {
+            firebase.initializeApp(firebaseConfig);
+        }
         const auth = firebase.auth();
         const db = firebase.firestore();
-        const appId = "cricket-scan-pro-v4";
-        const apiKey = myGeminiApiKey;
+        const appId = typeof __app_id !== 'undefined' ? __app_id : "cricket-scan-pro-v4";
+        const apiKey = myGeminiApiKey || "";
 
         // --- UTILS ---
         const formatTime = (seconds) => {
@@ -155,20 +162,36 @@
             const abortRef = useRef(false);
             const lastDetectionTimeRef = useRef(-10);
 
+            // Authentication Lifecycle
             useEffect(() => {
-                const unsubscribe = auth.onAuthStateChanged((u) => {
-                    if (u) {
-                        setUser(u);
-                        const projectRef = db.collection('artifacts').doc(appId).collection('public').doc('data').collection('projects').doc('main');
-                        projectRef.onSnapshot((doc) => {
-                            if (doc.exists) setTriggers(doc.data().triggers || []);
-                        });
-                    } else {
-                        auth.signInAnonymously();
+                const initAuth = async () => {
+                    try {
+                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                            await auth.signInWithCustomToken(__initial_auth_token);
+                        } else {
+                            await auth.signInAnonymously();
+                        }
+                    } catch (e) {
+                        console.error("Authentication setup failed:", e);
                     }
+                };
+                initAuth();
+
+                const unsubscribe = auth.onAuthStateChanged((u) => {
+                    setUser(u);
                 });
                 return () => unsubscribe();
             }, []);
+
+            // Data Sync Lifecycle
+            useEffect(() => {
+                if (!user) return;
+                const projectRef = db.collection('artifacts').doc(appId).collection('public').doc('data').collection('projects').doc('main');
+                const unsubscribe = projectRef.onSnapshot((doc) => {
+                    if (doc.exists) setTriggers(doc.data().triggers || []);
+                }, err => console.error("Firestore connectivity error:", err));
+                return () => unsubscribe();
+            }, [user]);
 
             const saveProjectToCloud = async (newTriggers) => {
                 if (!user) return;
@@ -185,7 +208,11 @@
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify(payload)
                         });
-                        if (!response.ok) throw new Error("API Request failed");
+                        if (!response.ok) {
+                            const errorBody = await response.json();
+                            console.error("Gemini API Error Body:", errorBody);
+                            throw new Error(`API failed with status ${response.status}`);
+                        }
                         return await response.json();
                     } catch (err) {
                         if (i === retries - 1) throw err;
@@ -239,7 +266,7 @@
                                 }];
                             });
                         }
-                    } catch (e) { console.error(e); }
+                    } catch (e) { console.error("Vision scan failed at", t, e); }
                 }
                 setIsVisionScanning(false);
             };
@@ -258,7 +285,10 @@
                     const commentary = String(result.candidates?.[0]?.content?.parts?.[0]?.text || "Incredible performance!").trim();
                     setHighlights(prev => prev.map(h => h.id === highlight.id ? { ...h, commentary } : h));
                     return commentary;
-                } catch (err) { return "What a play!"; }
+                } catch (err) { 
+                    console.error("Commentary generation failed", err);
+                    return "What a play!"; 
+                }
                 finally { setActiveAIId(null); }
             };
 
@@ -276,7 +306,10 @@
                     const base64Data = result.candidates[0].content.parts[0].inlineData.data;
                     const pcmData = new Int16Array(Uint8Array.from(atob(base64Data), c => c.charCodeAt(0)).buffer);
                     return pcmToWav(pcmData, 24000);
-                } catch (e) { return null; }
+                } catch (e) { 
+                    console.error("TTS Audio fetch failed", e);
+                    return null; 
+                }
             };
 
             const exportMasterReel = async () => {
@@ -286,8 +319,9 @@
                 const video = videoRef.current;
                 const sorted = [...highlights].sort((a, b) => a.startTime - b.startTime);
                 
-                // Audio mixing setup
                 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                if (audioCtx.state === 'suspended') await audioCtx.resume();
+                
                 const dest = audioCtx.createMediaStreamDestination();
                 
                 const videoSource = audioCtx.createMediaElementSource(video);
@@ -325,7 +359,7 @@
                     if (commAudio) {
                         const commSource = audioCtx.createMediaElementSource(commAudio);
                         const commGain = audioCtx.createGain();
-                        commGain.gain.value = 1.8;
+                        commGain.gain.value = 2.0;
                         commSource.connect(commGain);
                         commGain.connect(dest);
                         setTimeout(() => commAudio.play().catch(console.warn), commentaryDelayMs);
@@ -440,7 +474,7 @@
                     <div className="flex flex-1 overflow-hidden">
                         <main className="flex-1 relative flex flex-col items-center justify-center p-6 bg-black/50">
                             {!videoUrl ? (
-                                <div className="text-center space-y-4 max-w-sm"><i className="fa-solid fa-broadcast-tower text-3xl text-emerald-500/50"></i><h3 className="text-xl font-black text-white uppercase italic">Broadcaster Input</h3></div>
+                                <div className="text-center space-y-4 max-sm"><i className="fa-solid fa-broadcast-tower text-3xl text-emerald-500/50"></i><h3 className="text-xl font-black text-white uppercase italic">Broadcaster Input</h3></div>
                             ) : (
                                 <div ref={containerRef} className="relative w-full max-w-5xl aspect-video rounded-3xl overflow-hidden border border-white/10 shadow-2xl bg-black"
                                     onMouseDown={(e) => { if (!videoUrl || isScanning || isVisionScanning || isExporting) return; const r = containerRef.current.getBoundingClientRect(); setIsDrawing(true); setStartPos({ x: e.clientX - r.left, y: e.clientY - r.top }); setCurrentRect({ x: e.clientX - r.left, y: e.clientY - r.top, width: 0, height: 0 }); }} 
@@ -488,7 +522,7 @@
                     </div>
                     {showModal && (
                         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-xl p-8">
-                            <div className="bg-slate-900 border border-white/10 p-8 rounded-[40px] shadow-2xl w-full max-w-sm text-center space-y-6">
+                            <div className="bg-slate-900 border border-white/10 p-8 rounded-[40px] shadow-2xl w-full max-sm text-center space-y-6">
                                 <h3 className="text-lg font-black uppercase">Lock Detector</h3>
                                 <div className="flex flex-col items-center gap-3 p-8 bg-black/40 rounded-3xl"><div className="w-16 h-16 rounded-2xl border-2 border-white/20" style={{ backgroundColor: `rgb(${pendingColor.r},${pendingColor.g},${pendingColor.b})` }} /><span className="text-[10px] font-bold text-emerald-400">Color Locked</span></div>
                                 <input type="text" value={triggerName} onChange={e => setTriggerName(e.target.value)} className="w-full bg-black/60 rounded-xl px-4 py-3 text-xs font-black uppercase text-center outline-none" />
